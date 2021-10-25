@@ -1,0 +1,19 @@
+name: simone
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python>=3.9
+  - pip>=21.1
+  - ipython
+  - pytorch>=1.9
+  - torchvision>=0.10
+  - cudatoolkit=11.1
+  - pip:
+    - einops
+    - flax>=0.3.5
+    - treex>=0.5
+    - pytorch_lightning
+    - tap
+    - ipdb
