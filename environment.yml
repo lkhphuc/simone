@@ -1,19 +1,23 @@
 name: simone
 channels:
   - pytorch
+  - anaconda
   - nvidia
   - defaults
 dependencies:
   - python>=3.9
   - pip>=21.1
   - ipython
-  - pytorch>=1.9
-  - torchvision>=0.10
-  - cudatoolkit=11.1
+  - pytorch
+  - torchvision
+  - cudatoolkit>=11.1
+  - cudnn>=8.2
+  - cuda-nvcc
   - pip:
     - einops
-    - flax>=0.3.5
-    - treex>=0.5
+    - flax
+    - treex
     - pytorch_lightning
+    - positional-encodings
     - tap
     - ipdb

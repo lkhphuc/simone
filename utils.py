@@ -16,14 +16,16 @@ class GenerateCallback(pl.Callback):
             input_imgs = self.input_imgs.to(pl_module.device)[:5]
             with torch.no_grad():
                 pl_module.eval()
-                x_slots, masks_logit, q_z, x_rec, masks_logit_rec = pl_module(input_imgs)
+                rec_x, masks, object_posterior, frame_posterior = pl_module(input_imgs)
+                # x_slots, masks_logit, q_z, x_rec, masks_logit_rec = pl_module(input_imgs)
                 # q_z, x_rec = pl_module(input_imgs)
                 pl_module.train()
             # Plot and add to tensorboard
-            x_cmb = E.reduce(x_rec*masks_logit.exp(), 'b s c h w -> b c h w', 'sum')
-            x_rec = E.rearrange(x_rec, 'b s c h w -> (s b) c h w', s=6)
-            segmap = masks_to_segmap(masks_logit)
-            imgs = torch.cat([input_imgs, x_cmb, segmap, x_rec], dim=0)
+            x_cmb = E.rearrange(torch.sum(rec_x*masks, 1), 'b t c h w -> (b t) c h w')
+            input_imgs = E.rearrange(input_imgs, 'b t c h w -> (b t) c h w')
+            # x_rec = E.rearrange(x_rec, 'b s c h w -> (s b) c h w', s=6)
+            # segmap = masks_to_segmap(masks_logit)
+            imgs = torch.cat([input_imgs, x_cmb,], dim=0)
             grid = torchvision.utils.make_grid(imgs, nrow=5, normalize=True, range=(-1, 1))
             trainer.logger.experiment.add_image("Reconstructions", grid, global_step=trainer.global_step)
 

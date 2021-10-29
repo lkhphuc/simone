@@ -23,9 +23,9 @@ class SpatialBroadcastDecoder(nn.Module):
         )
 
         # a pair of coordinate channels one for each spatial dimension – ranging from -1 to 1.
-        ys = torch.linspace(-1, 1, self.h)
-        xs = torch.linspace(-1, 1, self.w)
-        xb, yb = torch.meshgrid(ys, xs) 
+        xs = torch.linspace(-1, 1, self.h)
+        ys = torch.linspace(-1, 1, self.w)
+        xb, yb = torch.meshgrid(xs, ys, indexing='ij') 
         self.register_buffer("coord_map", E.rearrange([xb,yb], 'c h w -> c h w'))
 
     def forward(self, z):
