@@ -9,11 +9,15 @@ dependencies:
   - pip>=21.1
   - ipython
   - pytorch
+  # - cpuonly
   - torchvision
   - cudatoolkit>=11.1
   - cudnn>=8.2
   - cuda-nvcc
   - pip:
+    - datasets
+    - distrax
+    - clu
     - einops
     - flax
     - treex

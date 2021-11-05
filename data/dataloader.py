@@ -1,16 +1,17 @@
-import os
+from pathlib import Path
 from torch.utils import data
 import torchvision
 import numpy as np
+import einops as E
 from torch.utils.data import Dataset
 
 class SyntheticDataset(Dataset):
-    def __init__(self, mode='train', n_steps=10, dataset_class='vmds', transform=None, path="", T=0):
-        assert dataset_class in ['vmds', 'vor', 'spmot']
+    def __init__(self, file: str, n_steps=-1, transform=None, T=0, path="./data/datasets/", channel_last=False):
         self.transform = transform
-        path = os.path.join(path, dataset_class, '{}_{}.npy'.format(dataset_class, mode))
-        imgs : np.ndarray = np.load(path)
+        imgs : np.ndarray = np.load(Path(path, file))
         imgs = imgs[:, :n_steps]
+        if channel_last:
+            imgs = E.rearrange(imgs, 'b t c h w -> b t h w c')
         if T and T < n_steps:
             imgs = np.concatenate(np.split(imgs, imgs.shape[1]//T, axis=1))
         self.imgs = imgs.squeeze().astype(np.float32) # remove temporal dimension if == 1
@@ -25,18 +26,20 @@ class SyntheticDataset(Dataset):
         return len(self.imgs)
 
 
-def build_dataloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds', path='./data/data', T=0):
+def build_dataloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds', path='./data/datasets', T=0, channel_last=False):
 
-    tform = torchvision.transforms.Lambda(lambda n: n / 255.)
+    # tform = torchvision.transforms.Lambda(lambda n: n / 255.)
+    # tform = lambda x: x / 255.
+    tform = None
 
     train_loader = data.DataLoader(
-            SyntheticDataset(mode='train', n_steps=n_steps, transform=tform, dataset_class=dataset_class, path=path, T=T),
+            SyntheticDataset(f"{dataset_class}/{dataset_class}_train.npy", n_steps=n_steps, transform=tform, path=path, T=T, channel_last=channel_last),
             batch_size=batch_size, 
             shuffle=True, 
             num_workers=num_workers, pin_memory=True)
 
     val_loader = data.DataLoader(
-            SyntheticDataset(mode='val', n_steps=n_steps, transform=tform, dataset_class=dataset_class, path=path, T=T),
+            SyntheticDataset(f"{dataset_class}/{dataset_class}_val.npy", n_steps=n_steps, transform=tform, path=path, T=T, channel_last=channel_last),
             batch_size=batch_size, 
             shuffle=False,
             num_workers=num_workers, pin_memory=True)
@@ -44,12 +47,13 @@ def build_dataloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds'
     return train_loader, val_loader
 
 
-def build_testloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds', path='./data/data'):
+def build_testloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds', path='./data/datasets', channel_last=False):
 
-    tform = torchvision.transforms.Lambda(lambda n: n / 255.)
+    # tform = torchvision.transforms.Lambda(lambda n: n / 255.)
+    tform = None
 
     test_loader = data.DataLoader(
-            SyntheticDataset(mode='test', n_steps=n_steps, transform=tform, dataset_class=dataset_class, path=path),
+            SyntheticDataset(f"{dataset_class}/{dataset_class}_test.npy", n_steps=n_steps, transform=tform, path=path, channel_last=channel_last),
             batch_size=batch_size, 
             shuffle=False,
             num_workers=num_workers, pin_memory=True)

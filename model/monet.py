@@ -1,108 +1,159 @@
-import pytorch_lightning as pl
-import torch
-import torch.distributions as dists
-import torch.nn.functional as F
+import jax
+import distrax as dist
+import flax.linen as nn
+import jax.numpy as jnp
 import einops as E
 
-from .cvae import cVAE
-from .attn import RecurrentAttention
 
-class MONet(pl.LightningModule):
+class _ConvBlock(nn.Module):
+  dim : int
+  @nn.compact
+  def __call__(self, x):
+    x = nn.Conv(self.dim, (3,3), 1, "SAME", use_bias=False)(x)
+    x = nn.GroupNorm(num_groups=None, group_size=1)(x)
+    x = nn.relu(x)
+    return x
 
-    def __init__(self, num_slot, beta=0.5, gamma=0.5):
-        super().__init__()
-        self.cvae = cVAE()
-        self.attn = RecurrentAttention()
-        self.num_slot = num_slot
-        self.beta = beta
-        self.gamma = gamma
 
-    def forward(self, x):
-        log_masks = self.attn(x, self.num_slot)
-        log_masks = E.rearrange(log_masks, 's b 1 h w -> b s 1 h w')
-        x_slots = E.repeat(x, 'b c h w -> b s c h w', s=self.num_slot)
-        x_masks = torch.cat([x_slots, log_masks], dim=2) # b s 4 h w
+class RecurrentAttention(nn.Module):
+  @nn.compact
+  def __call__(self, x, num_slot):
+    # Init full scope, i.e nothing is explained
+    log_scope = jnp.zeros_like(x[...,0:1])
+    # Recurrently compute object masks from remaining scope
+    log_masks = []
+    for _ in range(num_slot-1):
+      # Scope is in log scale
+      x_scope = jnp.concatenate([x, log_scope], axis=-1) # b h w 4
+      b, h, w, c = x_scope.shape
+      x1 = _ConvBlock(8)(x_scope)
+      x2 = _ConvBlock(16)(jax.image.resize(x1, (b, h//2**1, w//2**1, c), 'nearest'))
+      x3 = _ConvBlock(32)(jax.image.resize(x2, (b, h//2**2, w//2**2, c), 'nearest'))
+      x4 = _ConvBlock(64)(jax.image.resize(x3, (b, h//2**3, w//2**3, c), 'nearest'))
+      x5 = _ConvBlock(64)(jax.image.resize(x4, (b, h//2**4, w//2**4, c), 'nearest'))
+      
+      # MLP
+      z = E.rearrange(x5, 'b h w c -> b (h w c)')
+      z = nn.relu(nn.Dense(128)(z))
+      z = nn.relu(nn.Dense(128)(z))
+      z = nn.relu(nn.Dense(1024)(z))
+      z = E.rearrange(z, 'b (h w c) -> b h w c', h=h//2**4, w=w//2**4)
 
-        x_masks = E.rearrange(x_masks, 'b s c h w -> (b s) c h w')
-        q_z, x_masks_rec = self.cvae(x_masks)
-        x_masks_rec = E.rearrange(x_masks_rec, '(b s) c h w -> b s c h w', s=self.num_slot)
+      y5 = _ConvBlock(64)(jnp.concatenate([z, x5], axis=-1))
+      y4 = _ConvBlock(64)(jnp.concatenate([jax.image.resize(y5, [b,h//2**3,w//2**3,c], 'nearest'), x4], 3))
+      y3 = _ConvBlock(32)(jnp.concatenate([jax.image.resize(y4, [b,h//2**2,w//2**2,c], 'nearest'), x3], 3))
+      y2 = _ConvBlock(16)(jnp.concatenate([jax.image.resize(y3, [b,h//2**1,w//2**1,c], 'nearest'), x2], 3))
+      y1 = _ConvBlock(8 )(jnp.concatenate([jax.image.resize(y2, [b,h,w,c], 'nearest'), x1], 3))
+      alpha = nn.Conv(1, (1,1))(y1)
 
-        # 3 RGB channels for the means of the image components xk and
-        x_rec = torch.sigmoid(x_masks_rec[:, :, 0:3])
-        # 1 for the logits used for the softmax operation
-        # to compute the reconstructed attention masks  mk.
-        log_masks_rec = x_masks_rec[:, :, 3:]
+      log_alpha = jax.nn.log_softmax(jnp.concatenate([alpha, 1-alpha], axis=-1), axis=-1)
+      log_masks.append(log_scope + log_alpha[...,0:1])
+      log_scope = log_scope + log_alpha[...,1:2]
 
-        return x_slots, log_masks, q_z, x_rec, log_masks_rec
+    # Last mask is the remaining scope
+    log_masks.append(log_scope) # Explained the rest
+    return log_masks
 
-    def training_step(self, batch, batch_idx):
-        x_slots, log_masks, q_z, x_rec, log_masks_rec = self.forward(batch)
-        del(batch)
 
-        scale = torch.ones_like(x_rec, device=self.device) * 0.11
-        scale[:,0,:,:,:] = 0.09  # different scale for 1st slot
-        p_x = dists.Normal(x_rec, scale)
-        nll = -p_x.log_prob(x_slots) * log_masks.exp() # Weighted by the masks
-        nll = E.reduce(nll, 'b s c h w -> b', 'sum').mean()
+class SpatialBroadcastDecoder(nn.Module):
+  h : int = 64
+  w :int = 64
 
-        p_z = dists.Normal(0., 1.)
-        latent_loss = dists.kl_divergence(q_z, p_z)
-        latent_loss = E.reduce(latent_loss, '(b s) c -> b', 'sum', s=self.num_slot).mean()
+  @nn.compact
+  def __call__(self, z):
+    # a pair of coordinate channels one for each spatial dimension – ranging from -1 to 1.
+    xs = jnp.linspace(-1, 1, self.h+8)
+    ys = jnp.linspace(-1, 1, self.w+8)
+    coord_map = jnp.meshgrid(xs, ys, indexing='ij')
+    coord_map = E.rearrange(coord_map, 'c h w -> h w c')
+    coord_map = E.repeat(coord_map, 'h w c -> b h w c', b=z.shape[0])
+    z = E.repeat(z, 'b c -> b h w c', h=self.h+8, w=self.w+8)
+    z = jnp.concatenate((z, coord_map), axis=-1) # concat in the channel dimension
 
-        q_c = dists.Categorical(logits=E.rearrange(log_masks,     'b s c h w -> b c h w s'))
-        p_c = dists.Categorical(logits=E.rearrange(log_masks_rec, 'b s c h w -> b c h w s'))
-        mask_loss = E.reduce(dists.kl_divergence(q_c, p_c), 'b c h w -> b', 'sum').mean()
+    z = nn.relu(nn.Conv(32, (3,3), strides=1, padding="VALID")(z))
+    z = nn.relu(nn.Conv(32, (3,3), strides=1, padding="VALID")(z))
+    z = nn.relu(nn.Conv(32, (3,3), strides=1, padding="VALID")(z))
+    z = nn.relu(nn.Conv(32, (3,3), strides=1, padding="VALID")(z))
+    z =         nn.Conv(4 , (1,1), strides=1, padding="VALID")(z)
+    return z
 
-        loss = nll + self.beta*latent_loss + self.gamma*mask_loss
+class cVAE(nn.Module):
+  z_dim : int = 16
+  beta : float = 0.5
 
-        self.log("loss/train", loss)
-        self.log("loss/nll", nll)
-        self.log("loss/latent", latent_loss)
-        self.log("loss/mask", mask_loss)
-        return loss
+  @nn.compact
+  def __call__(self, x):
+    # x = image + mask
+    x = nn.relu(nn.Conv(32, (3,3), strides=(2,2), padding="SAME")(x))
+    x = nn.relu(nn.Conv(32, (3,3), strides=(2,2), padding="SAME")(x))
+    x = nn.relu(nn.Conv(64, (3,3), strides=(2,2), padding="SAME")(x))
+    x = nn.relu(nn.Conv(64, (3,3), strides=(2,2), padding="SAME")(x))
+    x = E.rearrange(x, 'b h w c -> b (h w c)')
+    x = nn.relu(nn.Dense(256)(x))
+    z = nn.Dense(self.z_dim*2)(x)
 
-    def validation_step(self, batch, batch_idx):
-        x_slots, log_masks, q_z, x_rec, log_masks_rec = self.forward(batch)
-        del(batch)
+    # The MLP output parameterises the μ and log σ of a 16-dim Gaussian latent posterior.
+    mean = z[..., :self.z_dim]
+    logvar = z[..., self.z_dim:]
+    q_zx = dist.MultivariateNormalDiag(mean, jnp.exp(logvar/2)) # q(z|x)
+    z = q_zx.sample(seed=self.make_rng(name='qz'))
 
-        scale = torch.ones_like(x_rec, device=self.device) * 0.11
-        scale[:,0,:,:,:] = 0.09  # different scale for 1st slot
-        p_x = dists.Normal(x_rec, scale)
-        nll = -p_x.log_prob(x_slots) + log_masks # Weighted by the masks
-        nll = E.reduce(nll, 'b s c h w -> b', 'sum').mean()
+    x_rec = SpatialBroadcastDecoder(h=64, w=64)(z)
+    return q_zx, x_rec
 
-        p_z = dists.Normal(0., 1.)
-        latent_loss = dists.kl_divergence(q_z, p_z)
-        latent_loss = E.reduce(latent_loss, '(b s) c -> b', 'sum', s=self.num_slot).mean()
 
-        q_c = dists.Categorical(logits=E.rearrange(log_masks,     'b s c h w -> b c h w s'))
-        p_c = dists.Categorical(logits=E.rearrange(log_masks_rec, 'b s c h w -> b c h w s'))
-        mask_loss = E.reduce(dists.kl_divergence(q_c, p_c), 'b c h w -> b', 'sum').mean()
+class MONet(nn.Module):
+  num_slot : int
+  beta : float = 0.5
+  gamma : float = 0.5
 
-        loss = nll + self.beta*latent_loss + self.gamma*mask_loss
-        return loss
+  @nn.compact
+  def __call__(self, x):
+    log_masks = RecurrentAttention()(x, self.num_slot)
+    log_masks = E.rearrange(log_masks, 's b h w 1 -> b s h w 1')
+    x_slots = E.repeat(x, 'b h w c -> b s h w c', s=self.num_slot)
+    x_masks = jnp.concatenate([x_slots, log_masks], axis=-1) # b s h w 4
 
-    def validation_epoch_end(self, outputs) -> None:
-        loss = torch.tensor(outputs).mean()
-        self.log("loss/val", loss)
+    x_masks = E.rearrange(x_masks, 'b s h w c -> (b s) h w c')
+    q_z, x_masks_rec = cVAE()(x_masks)
+    x_masks_rec = E.rearrange(x_masks_rec, '(b s) h w c -> b s h w c', s=self.num_slot)
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.RMSprop(self.parameters(), lr=1e-4)
-        return optimizer
+    # 3 RGB channels for the means of the image components xk and
+    x_rec = jax.nn.sigmoid(x_masks_rec[...,0:3])
+    # 1 for the logits used for the softmax operation
+    # to compute the reconstructed attention masks  mk.
+    log_masks_rec = x_masks_rec[...,3:]
+
+    return q_z, [x_slots, x_rec], [log_masks, log_masks_rec]
+
+
+def loss_fn(q_z, images, masks_logit, beta=0.5, gamma=0.5):
+  images_input, images_rec = images
+  masks_input, masks_rec = masks_logit
+  scale = jnp.ones_like(images_rec) * 0.11
+  scale = scale.at[:,0].set(0.09)  # different scale for 1st slot
+  p_x = dist.MultivariateNormalDiag(images_rec, scale)
+  nll = -p_x.log_prob(images_input) * jnp.exp(masks_input.squeeze()) # Weighted by the masks
+  nll = E.reduce(nll, 'b s h w -> b', 'sum').mean()
+
+  p_z = dist.MultivariateNormalDiag(jnp.zeros_like(q_z.loc), jnp.ones_like(q_z.scale_diag))
+  latent_kl = q_z.kl_divergence(p_z).mean()
+
+  q_c = dist.Categorical(logits=E.rearrange(masks_input,     'b s h w c -> b h w c s'))
+  p_c = dist.Categorical(logits=E.rearrange(masks_rec, 'b s c h w -> b h w c s'))
+  mask_loss = q_c.kl_divergence(p_c).mean()
+
+  return nll + beta * latent_kl + gamma * mask_loss
+
 
 def _test():
-    import streamlit as st
+  inputs = jnp.zeros([10,64,64,3])
+  model = MONet(num_slot=5)
+  rngs = {'params': jax.random.PRNGKey(0), "qz": jax.random.PRNGKey(1)}
+  params = model.init(rngs, inputs)
+  out = model.apply(params, inputs, rngs={"qz":jax.random.PRNGKey(1)})
 
-    model = MONet(num_slot=6)
-    input = torch.randn((2, 3, 64, 64))
-    # scope = torch.rand((1, 1, 64, 64))
-    out = model(input)
-    print(out.shape)
-    out = out.detach().cpu().numpy().transpose((0,2,3,1))
-    st.image(E.rearrange(out, 'b h w (c c1) -> (b c) h w c1', c1=1))
-
-    out = out.sum(-1, keepdims=True)
-    st.image(1-(out.sum(-1,keepdims=True)/out.max()))
 
 if __name__ == "__main__":
-    _test()
+  _test()
+
