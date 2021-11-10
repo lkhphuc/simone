@@ -96,7 +96,7 @@ class cVAE(nn.Module):
     mean = z[..., :self.z_dim]
     logvar = z[..., self.z_dim:]
     q_zx = dist.MultivariateNormalDiag(mean, jnp.exp(logvar/2)) # q(z|x)
-    z = q_zx.sample(seed=self.make_rng(name='qz'))
+    z = q_zx.sample(seed=self.make_rng("qz"))
 
     x_rec = SpatialBroadcastDecoder(h=64, w=64)(z)
     return q_zx, x_rec
@@ -124,26 +124,8 @@ class MONet(nn.Module):
     # to compute the reconstructed attention masks  mk.
     log_masks_rec = x_masks_rec[...,3:]
 
-    return q_z, [x_slots, x_rec], [log_masks, log_masks_rec]
+    return q_z, (x_slots, x_rec), (log_masks, log_masks_rec)
 
-
-def loss_fn(q_z, images, masks_logit, beta=0.5, gamma=0.5):
-  images_input, images_rec = images
-  masks_input, masks_rec = masks_logit
-  scale = jnp.ones_like(images_rec) * 0.11
-  scale = scale.at[:,0].set(0.09)  # different scale for 1st slot
-  p_x = dist.MultivariateNormalDiag(images_rec, scale)
-  nll = -p_x.log_prob(images_input) * jnp.exp(masks_input.squeeze()) # Weighted by the masks
-  nll = E.reduce(nll, 'b s h w -> b', 'sum').mean()
-
-  p_z = dist.MultivariateNormalDiag(jnp.zeros_like(q_z.loc), jnp.ones_like(q_z.scale_diag))
-  latent_kl = q_z.kl_divergence(p_z).mean()
-
-  q_c = dist.Categorical(logits=E.rearrange(masks_input,     'b s h w c -> b h w c s'))
-  p_c = dist.Categorical(logits=E.rearrange(masks_rec, 'b s c h w -> b h w c s'))
-  mask_loss = q_c.kl_divergence(p_c).mean()
-
-  return nll + beta * latent_kl + gamma * mask_loss
 
 
 def _test():

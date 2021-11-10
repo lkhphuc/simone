@@ -34,7 +34,7 @@ class OCRB(datasets.GeneratorBasedBuilder):
         return datasets.DatasetInfo(
             description=_DESCRIPTION,
             features=datasets.Features({
-                "video": datasets.Array4D(shape=(10,64,64,3), dtype="float32"),
+                "video": datasets.Array4D(shape=(10,64,64,3), dtype="uint8"),
             }),
             supervised_keys=None,
             # Homepage of the dataset for documentation
@@ -80,7 +80,6 @@ class OCRB(datasets.GeneratorBasedBuilder):
         # This method handles input defined in _split_generators to yield (key, example) tuples from the dataset.
         # The `key` is here for legacy reason (tfds) and is not important in itself.
         imgs = E.rearrange(np.load(filepath), 'b t c h w -> b t h w c')
-        imgs = imgs.astype(np.float32) / 255.
 
-        for idx in range(len(imgs[:128])):
+        for idx in range(len(imgs)):
             yield idx, {"video": imgs[idx]}
