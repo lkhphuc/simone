@@ -14,7 +14,7 @@ class SyntheticDataset(Dataset):
             imgs = E.rearrange(imgs, 'b t c h w -> b t h w c')
         if T and T < n_steps:
             imgs = np.concatenate(np.split(imgs, imgs.shape[1]//T, axis=1))
-        self.imgs = imgs.squeeze().astype(np.float32) # remove temporal dimension if == 1
+        self.imgs = imgs[:,0].astype(np.float32) / 255.0
 
     def __getitem__(self, index):
         x = self.imgs[index]
@@ -29,7 +29,6 @@ class SyntheticDataset(Dataset):
 def build_dataloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds', path='./data/datasets', T=0, channel_last=False):
 
     # tform = torchvision.transforms.Lambda(lambda n: n / 255.)
-    # tform = lambda x: x / 255.
     tform = None
 
     train_loader = data.DataLoader(
@@ -59,3 +58,11 @@ def build_testloader(batch_size, num_workers=1, n_steps=10, dataset_class='vmds'
             num_workers=num_workers, pin_memory=True)
 
     return test_loader
+
+
+def _test():
+    train_dl, val_dl = build_dataloader(16, dataset_class="vor")
+    __import__('ipdb').set_trace()
+
+if __name__ == "__main__":
+    _test()
