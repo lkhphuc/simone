@@ -8,8 +8,8 @@ import optax
 import typer
 from tensorboardX import SummaryWriter
 
-from data.dataloader import build_dataloader
 from simone import SIMONe, SIMONeModel
+from dataloader import build_dataloader
 
 
 class CustomLogger(eg.callbacks.TensorBoard):
@@ -22,18 +22,22 @@ class CustomLogger(eg.callbacks.TensorBoard):
     def on_epoch_end(self, epoch, logs=None):
         # Log the same reconstruction image during training
         model = self.model.local()
-        (imgs_inp, imgs_rec), (masks_inp, _), (_, _) = model.predict(self.imgs)
-        x_cmb = jnp.sum(imgs_rec * masks_inp, axis=1)
-        imgs = E.rearrange([imgs_inp[:, 0], x_cmb], " s b h w c -> (s h) (b w) c")
+        rec_x, masks, object_params, frame_params = model.predict(self.imgs)
+        x = rec_x * masks
+        x_cmb = jnp.sum(x, axis=1)
+        plot_imgs = jnp.concatenate([self.imgs[:,None], x_cmb[:,None], x], axis=1)
+        plot_imgs = E.rearrange(plot_imgs, " b k t h w c -> b (k h) (t w) c")
         if epoch % self.update_freq == 0:
-            self.train_writer.add_image(
-                "Reconstruction", imgs, epoch, dataformats="HWC"
-            )
+            for i in range(4):
+                self.train_writer.add_image(
+                    f"Reconstruction/{i}", plot_imgs[i], epoch, dataformats="HWC"
+                )
 
 
 def main(
     lr: float = 1e-4,
     epochs: int = 100,
+    nstep: int = None,
     eager: bool = False,
     profiling: bool = False,
 ):
@@ -57,13 +61,12 @@ def main(
 
     model.summary(sample_inp)
     model = model.distributed()
-    jax.profiler.save_device_memory_profile("memory-model-start.prof")
 
     history = model.fit(
         inputs=train_dl,
         validation_data=val_dl,
         # batch_size=32,
-        # steps_per_epoch=200,
+        # steps_per_epoch=nstep,
         epochs=epochs,
         callbacks=[
             eg.callbacks.TensorBoard(logdir=logdir),

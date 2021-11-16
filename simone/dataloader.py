@@ -1,6 +1,5 @@
 from pathlib import Path
 from torch.utils import data
-import torchvision
 import numpy as np
 import einops as E
 from torch.utils.data import Dataset
@@ -14,7 +13,7 @@ class SyntheticDataset(Dataset):
             imgs = E.rearrange(imgs, 'b t c h w -> b t h w c')
         if T and T < n_steps:
             imgs = np.concatenate(np.split(imgs, imgs.shape[1]//T, axis=1))
-        self.imgs = imgs[:,0].astype(np.float32) / 255.0
+        self.imgs = imgs.astype(np.float32) / 255.0
 
     def __getitem__(self, index):
         x = self.imgs[index]

@@ -9,7 +9,7 @@ import typer
 from tensorboardX import SummaryWriter
 
 from .dataloader import build_dataloader
-from model.monet import MONet, MONetModel
+from .monet import MONet, MONetModel
 
 
 class MONetCustomLogger(eg.callbacks.TensorBoard):
