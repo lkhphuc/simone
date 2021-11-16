@@ -6,12 +6,15 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
+from tensorboardX import SummaryWriter
 
-from data.dataloader import build_dataloader
+from .dataloader import build_dataloader
 from model.monet import MONet, MONetModel
 
 
 class MONetCustomLogger(eg.callbacks.TensorBoard):
+    model: eg.Model
+    train_writer: SummaryWriter
     def __init__(self, imgs, **kwargs):
         super().__init__(**kwargs)
         self.imgs = imgs
@@ -48,7 +51,7 @@ def main(
     sample_inp = next(iter(train_dl)).detach().numpy()[:5]
 
     model = MONetModel(
-        module=MONet(num_slot=num_slot),
+        module=MONet(num_slot),
         optimizer=optax.adamw(lr),
         eager=eager,
     )
@@ -59,9 +62,9 @@ def main(
 
     history = model.fit(
         inputs=train_dl,
-        # steps_per_epoch=200,
-        # batch_size=32,
         validation_data=val_dl,
+        # batch_size=32,
+        # steps_per_epoch=200,
         epochs=epochs,
         callbacks=[
             eg.callbacks.TensorBoard(logdir=logdir),

@@ -155,16 +155,13 @@ class MONetModel(eg.Model):
     gamma: float = 0.5
 
     def init_step(self, key: jnp.ndarray, inputs: tp.Any):
-        self.next_key = eg.KeySeq(key)
-
         self.module.init_rngs = ("params", "z")
         self.module.rngs = ("z",)
         self.module = self.module.init(key, inputs)
-
         self.optimizer = self.optimizer.init(self.parameters())
         return self
 
-    def test_step(self, inputs: tp.Any, labels: tp.Mapping[str, tp.Any]):
+    def test_step(self, inputs: tp.Any):
         (imgs_inp, imgs_rec), (masks_inp, masks_rec), (z_mean, z_logstd) = self.module(
             inputs
         )
