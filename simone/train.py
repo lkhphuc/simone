@@ -8,7 +8,7 @@ import optax
 import typer
 from tensorboardX import SummaryWriter
 
-from model_new import SIMONeModel, Encoder, Decoder
+from model import SIMONeModel
 # from dataloader import build_dataloader
 from data.cater import build_dataloader
 
@@ -43,7 +43,7 @@ class CustomLogger(eg.callbacks.TensorBoard):
 
 def main(
     lr: float = 20e-5,
-    bs: int = 6,
+    bs: int = 7,
     epochs: int = 1000,
     nstep: int = None,
     eager: bool = False,
@@ -57,22 +57,26 @@ def main(
 
     if profiling:
         eager = False
-        jax.profiler.start_server(9999)
         jax.profiler.start_trace(logdir)
+        jax.profiler.start_server(9999)
 
 
     # train_dl, val_dl = build_dataloader(
     #     ndevice*bs, num_workers=ndevice*2, dataset_class="vor", path="data/datasets", channel_last=True
     # )
-    train_dl, val_dl = build_dataloader(
-        ndevice*bs, num_workers=ndevice*4, path="data/datasets/CATER/", channel_last=True
+    train_dl = build_dataloader("train",
+        ndevice*bs, num_workers=ndevice*6, nframes=10, path="data/datasets/CATER/", channel_last=True, shuffle=True,
+    )
+    val_dl = build_dataloader("val",
+            ndevice*bs, num_workers=ndevice*2, nframes=10, path="data/datasets/CATER/", channel_last=True, prefetch_factor=4,
     )
 
     sample_inp = next(iter(train_dl)).detach().numpy()[:ndevice]
 
     model = SIMONeModel(
-        # module=SIMONe(),
-        optimizer=optax.adamw(lr),
+        beta_o=1e-5,
+        beta_f=1e-4,
+        optimizer=optax.sm3(lr),
         eager=eager,
     )
 
@@ -92,8 +96,8 @@ def main(
             eg.callbacks.ModelCheckpoint(path=logdir, monitor="val_loss/total", save_best_only=True),
             CustomLogger(sample_inp, logdir=logdir),
         ],
-    )
 
+        )
 
     if profiling:
         jax.profiler.stop_trace()
