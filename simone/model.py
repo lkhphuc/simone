@@ -36,9 +36,9 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-    nlayer: int = 2
-    nhead: int = 2
-    ndim: int = 64
+    nlayer: int = 4  # TODO Bigger
+    nhead: int = 4
+    ndim: int = 128
 
     @nn.compact
     def __call__(self, x):
@@ -51,35 +51,33 @@ class Encoder(nn.Module):
     num_slots: int = 16
     z_dim: int = 32
     conv_dim: int = 128
-    nlayer: int = 4
-    nhead: int = 5
-    ndim: int = 1024
+    # nlayer: int = 4
+    # nhead: int = 5
+    # ndim: int = 1024
 
     @nn.compact
     def __call__(self, x):
         b, t, h, w, c = x.shape
         x = E.rearrange(x, "b t h w c -> (b t) h w c")
         z = ConvBlock(self.conv_dim)(x)  # b t 8 8 128
-
         z = E.rearrange(z, "(b t) h w c -> b t h w c", t=t)
+
         z = PositionalEmbedding3D(128)(z)
 
         z = E.rearrange(z, "b t h w c -> b (t h w) c")
         z = TransformerEncoder()(z)
+        z = E.rearrange(z, "b (t h w) c -> b t h w c", t=t, h=8, w=8)
 
         # Sum Pooling to get K slots
-        z = E.rearrange(z, "b (t h w) c -> b t h w c", t=t, h=8, w=8)
         z = E.reduce(z, "b t (h h2) (w w2) c -> b t h w c", "sum", h2=2, w2=2)
 
         z = E.rearrange(z, "b t i j c -> b (t i j) c", t=t)
         z = TransformerEncoder()(z)
-
         z = E.rearrange(z, "b (t k) c -> b k t c", t=t, k=self.num_slots)
-        object_params = nn.Dense(self.z_dim * 2)(
-            E.reduce(z, "b k t c -> b k c", "mean")
-        )
+
+        obj_params = nn.Dense(self.z_dim * 2)(E.reduce(z, "b k t c -> b k c", "mean"))
         frame_params = nn.Dense(self.z_dim * 2)(E.reduce(z, "b k t c -> b t c", "mean"))
-        return object_params, frame_params
+        return obj_params, frame_params
 
 
 class Decoder(nn.Module):
@@ -123,9 +121,7 @@ class SIMONe(nn.Module):
             jnp.arange(0, t), "t -> b k t h w 1", b=b, k=self.k, h=h, w=w
         )
 
-        object_params, frame_params = Encoder(z_dim=32, conv_dim=self.conv_dim)(
-            x
-        )  # Inference network
+        object_params, frame_params = Encoder(z_dim=32, conv_dim=self.conv_dim)(x)
 
         object_posterior = dist.MultivariateNormalDiag(
             object_params[..., : self.z_dim], jnp.exp(object_params[..., self.z_dim :])
@@ -153,8 +149,9 @@ class SIMONe(nn.Module):
         rec_x_masks = E.rearrange(
             rec_x_masks, "(b k t) h w c -> b k t h w c", b=b, k=self.k, t=t
         )
-        rec_x, masks = rec_x_masks[..., :3], rec_x_masks[..., 3:]
-        masks = jax.nn.softmax(masks, axis=1)  # softmax along the K object dims
+        rec_x = jax.nn.sigmoid(rec_x_masks[..., :3])
+        # softmax along the K object dims
+        masks = jax.nn.softmax(rec_x_masks[..., 3:], axis=1)
 
         return rec_x, masks, object_params, frame_params
 
@@ -162,9 +159,9 @@ class SIMONe(nn.Module):
 class SIMONeModel(eg.Model):
     module: eg.FlaxModule
     optimizer: eg.Optimizer
-    alpha = 1
-    beta_o = 0.5
-    beta_f = 0.5
+    alpha = 0.2
+    beta_o = 1e-8
+    beta_f = 1e-8
 
     def init_step(self, key: jnp.ndarray, inputs):
         self.module.rngs = ("latent",)
@@ -177,11 +174,10 @@ class SIMONeModel(eg.Model):
         rec_x, masks, object_params, frame_params = self.module(x)
         latent_dim = object_params.shape[-1] // 2
         # Full frame equals mixture over slots
-        rec_x_full = jnp.sum(rec_x * masks, axis=1)
+        rec_x_full = jnp.sum(rec_x * masks, axis=1)  # b t h w c
 
-        p_x = dist.Normal(jax.nn.sigmoid(rec_x_full), jnp.ones_like(rec_x_full) * 0.08)
-        nll = -p_x.log_prob(x)
-        nll = E.reduce(nll, "b t c h w -> b t h w", "sum").mean()  # Mean over b+t+h+w
+        p_x = dist.MultivariateNormalDiag(rec_x_full, jnp.ones_like(rec_x_full) * 0.08)
+        nll = -p_x.log_prob(x).mean()  # Mean over b+t+h+w
 
         object_prior = dist.MultivariateNormalDiag(
             jnp.zeros_like(object_params[..., :latent_dim]),
@@ -203,7 +199,7 @@ class SIMONeModel(eg.Model):
 
         loss = self.alpha * nll + self.beta_o * object_kl + self.beta_f * frame_kl
         logs = {
-            "loss/train": loss,
+            "loss/total": loss,
             "loss/nll": self.alpha * nll,
             "loss/latent_o": self.beta_o * object_kl,
             "loss/latent_f": self.beta_f * frame_kl,
@@ -218,7 +214,7 @@ def _test():
     out, params = model.init_with_output(
         {"params": jax.random.PRNGKey(42), "latent": jax.random.PRNGKey(12)}, inputs
     )
-    print(out.shape)
+    out = model.predict()
 
 
 if __name__ == "__main__":

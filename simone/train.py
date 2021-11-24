@@ -8,8 +8,9 @@ import optax
 import typer
 from tensorboardX import SummaryWriter
 
-from simone import SIMONe, SIMONeModel
-from dataloader import build_dataloader
+from model_new import SIMONeModel, Encoder, Decoder
+# from dataloader import build_dataloader
+from data.cater import build_dataloader
 
 
 class CustomLogger(eg.callbacks.TensorBoard):
@@ -19,14 +20,20 @@ class CustomLogger(eg.callbacks.TensorBoard):
         super().__init__(**kwargs)
         self.imgs = imgs
 
-    def on_epoch_end(self, epoch, logs=None):
+    def on_epoch_end(self, epoch, logs={}):
         # Log the same reconstruction image during training
         model = self.model.local()
-        rec_x, masks, object_params, frame_params = model.predict(self.imgs)
-        x = rec_x * masks
-        x_cmb = jnp.sum(x, axis=1)
-        plot_imgs = jnp.concatenate([self.imgs[:,None], x_cmb[:,None], x], axis=1)
+        rec_x, masks = model.predict(self.imgs)
+
+        def norm_ip(img, low, high):
+            img = jnp.clip(img, low, high)
+            img = (img - low) / max(high - low, 1e-5)
+            return img
+
+        x_cmb = jnp.sum(rec_x * masks, axis=1)
+        plot_imgs = jnp.concatenate([self.imgs[:,None], x_cmb[:,None], rec_x], axis=1)
         plot_imgs = E.rearrange(plot_imgs, " b k t h w c -> b (k h) (t w) c")
+        # plot_imgs = norm_ip(plot_imgs, 0, 1)
         if epoch % self.update_freq == 0:
             for i in range(4):
                 self.train_writer.add_image(
@@ -35,41 +42,54 @@ class CustomLogger(eg.callbacks.TensorBoard):
 
 
 def main(
-    lr: float = 1e-4,
-    epochs: int = 100,
+    lr: float = 20e-5,
+    bs: int = 6,
+    epochs: int = 1000,
     nstep: int = None,
     eager: bool = False,
     profiling: bool = False,
+    distributed: bool = True,
 ):
-    logdir = f"runs/{datetime.now()}"
+    logdir = f"runs/{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ndevice = 1
+    if distributed:
+        ndevice = jax.device_count()
 
     if profiling:
+        eager = False
         jax.profiler.start_server(9999)
         jax.profiler.start_trace(logdir)
 
+
+    # train_dl, val_dl = build_dataloader(
+    #     ndevice*bs, num_workers=ndevice*2, dataset_class="vor", path="data/datasets", channel_last=True
+    # )
     train_dl, val_dl = build_dataloader(
-        64, num_workers=24, dataset_class="vor", path="data/datasets", channel_last=True
+        ndevice*bs, num_workers=ndevice*4, path="data/datasets/CATER/", channel_last=True
     )
 
-    sample_inp = next(iter(train_dl)).detach().numpy()[:8]
+    sample_inp = next(iter(train_dl)).detach().numpy()[:ndevice]
 
     model = SIMONeModel(
-        module=SIMONe(),
+        # module=SIMONe(),
         optimizer=optax.adamw(lr),
         eager=eager,
     )
 
-    model.summary(sample_inp)
-    model = model.distributed()
+    # model.summary(sample_inp)
+    if distributed:
+        model = model.distributed()
 
     history = model.fit(
         inputs=train_dl,
         validation_data=val_dl,
-        # batch_size=32,
-        # steps_per_epoch=nstep,
+        batch_size=bs,
+        steps_per_epoch=nstep,
+        # validation_steps=10,
         epochs=epochs,
         callbacks=[
             eg.callbacks.TensorBoard(logdir=logdir),
+            eg.callbacks.ModelCheckpoint(path=logdir, monitor="val_loss/total", save_best_only=True),
             CustomLogger(sample_inp, logdir=logdir),
         ],
     )
