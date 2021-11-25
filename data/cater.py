@@ -50,7 +50,6 @@ def build_dataloader(
     path="./data/datasets/CATER/",
     size=64,
     nframes=16,
-    channel_last=False,
     shuffle=False,
     transform=None,
     prefetch_factor=2,
@@ -75,13 +74,14 @@ def build_dataloader(
     return loader
 
 
-def _test():
+def _dev():
     ds = CaterDataset("data/datasets/CATER/")
     vid1 = ds[0]
-    train_ds, val_ds = build_dataloader(10, channel_last=True)
+    train_dl = build_dataloader("train", 10)
+    val_dl = build_dataloader("val", 10)
+    batch = next(iter(train_dl))
     __import__("ipdb").set_trace()
-    batch = next(iter(train_ds))
 
 
 if __name__ == "__main__":
-    _test()
+    _dev()

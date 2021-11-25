@@ -56,7 +56,6 @@ class Encoder(nn.Module):
         z = ConvBlock()(x)  # b t 8 8 128
         z = E.rearrange(z, "(b t) h w c -> b t h w c", t=t)
 
-
         _, _, z_h, z_w, z_c = z.shape
         z = PositionalEmbedding3D(128)(z)
         z = E.rearrange(z, "b t h w c -> b (t h w) c")
@@ -161,6 +160,7 @@ class SIMONeModel(eg.Model):
             frame_params[:, :, : self.z_dim], jnp.exp(frame_params[:, :, self.z_dim :])
         )
         return object_posterior, frame_posterior
+
 
     def decode(self, object_posterior, frame_posterior, x):
         b, t, h, w, c = x.shape

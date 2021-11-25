@@ -6,16 +6,17 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
+from dataloader import build_dataloader
+from model import SIMONeModel
 from tensorboardX import SummaryWriter
 
-from model import SIMONeModel
-# from dataloader import build_dataloader
-from data.cater import build_dataloader
+# from data.cater import build_dataloader
 
 
 class CustomLogger(eg.callbacks.TensorBoard):
     model: eg.Model
     train_writer: SummaryWriter
+
     def __init__(self, imgs, **kwargs):
         super().__init__(**kwargs)
         self.imgs = imgs
@@ -31,7 +32,7 @@ class CustomLogger(eg.callbacks.TensorBoard):
             return img
 
         x_cmb = jnp.sum(rec_x * masks, axis=1)
-        plot_imgs = jnp.concatenate([self.imgs[:,None], x_cmb[:,None], rec_x], axis=1)
+        plot_imgs = jnp.concatenate([self.imgs[:, None], x_cmb[:, None], rec_x], axis=1)
         plot_imgs = E.rearrange(plot_imgs, " b k t h w c -> b (k h) (t w) c")
         # plot_imgs = norm_ip(plot_imgs, 0, 1)
         if epoch % self.update_freq == 0:
@@ -51,6 +52,7 @@ def main(
     distributed: bool = True,
 ):
     logdir = f"runs/{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
     ndevice = 1
     if distributed:
         ndevice = jax.device_count()
@@ -60,22 +62,25 @@ def main(
         jax.profiler.start_trace(logdir)
         jax.profiler.start_server(9999)
 
-
-    # train_dl, val_dl = build_dataloader(
-    #     ndevice*bs, num_workers=ndevice*2, dataset_class="vor", path="data/datasets", channel_last=True
+    train_dl, val_dl = build_dataloader(
+        ndevice * bs,
+        num_workers=ndevice * 2,
+        dataset_class="vor",
+        path="data/datasets",
+        channel_last=True,
+    )
+    # train_dl = build_dataloader("train",
+    #     ndevice*bs, num_workers=ndevice*6, nframes=10, path="data/datasets/CATER/", shuffle=True,
     # )
-    train_dl = build_dataloader("train",
-        ndevice*bs, num_workers=ndevice*6, nframes=10, path="data/datasets/CATER/", channel_last=True, shuffle=True,
-    )
-    val_dl = build_dataloader("val",
-            ndevice*bs, num_workers=ndevice*2, nframes=10, path="data/datasets/CATER/", channel_last=True, prefetch_factor=4,
-    )
+    # val_dl = build_dataloader("val",
+    #     ndevice*bs, num_workers=ndevice*4, nframes=10, path="data/datasets/CATER/", prefetch_factor=4,
+    # )
 
     sample_inp = next(iter(train_dl)).detach().numpy()[:ndevice]
 
     model = SIMONeModel(
-        beta_o=1e-5,
-        beta_f=1e-4,
+        beta_o=1e-8,
+        beta_f=1e-8,
         optimizer=optax.sm3(lr),
         eager=eager,
     )
@@ -93,11 +98,12 @@ def main(
         epochs=epochs,
         callbacks=[
             eg.callbacks.TensorBoard(logdir=logdir),
-            eg.callbacks.ModelCheckpoint(path=logdir, monitor="val_loss/total", save_best_only=True),
+            eg.callbacks.ModelCheckpoint(
+                path=logdir, monitor="val_loss/total", save_best_only=True
+            ),
             CustomLogger(sample_inp, logdir=logdir),
         ],
-
-        )
+    )
 
     if profiling:
         jax.profiler.stop_trace()
