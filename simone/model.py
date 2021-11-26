@@ -210,6 +210,10 @@ class SIMONeModel(eg.Model):
         p_x = dist.MultivariateNormalDiag(rec_x_full, jnp.ones_like(rec_x_full) * 0.08)
         nll = -p_x.log_prob(x).mean()  # Mean over b+t+h+w
 
+        x_slots = E.repeat(x, 'b t h w c -> b k t h w c', k=self.k)
+        p_x = dist.MultivariateNormalDiag(rec_x, jnp.ones_like(rec_x) * 0.08)
+        nll = -jnp.sum(p_x.log_prob(x_slots) * masks.squeeze(), axis=1).mean()  # Mean over b+t+h+w
+
         object_prior = dist.MultivariateNormalDiag(
             jnp.zeros_like(object_posterior.loc),
             jnp.ones_like(object_posterior.scale_diag),
